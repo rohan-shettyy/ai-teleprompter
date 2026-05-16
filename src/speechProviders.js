@@ -3,10 +3,11 @@ function splitWords(transcript) {
 }
 
 class BaseSpeechProvider {
-  constructor({ onStatus, onError }) {
+  constructor({ onStatus, onError, onToast }) {
     this.callbacks = new Set();
     this.onStatus = onStatus;
     this.onError = onError;
+    this.onToast = onToast;
   }
 
   onWord(callback) {
@@ -38,6 +39,10 @@ class BaseSpeechProvider {
   fail(message) {
     this.onError?.(message);
   }
+
+  toast(message) {
+    this.onToast?.(message);
+  }
 }
 
 export class WebSpeechProvider extends BaseSpeechProvider {
@@ -55,6 +60,7 @@ export class WebSpeechProvider extends BaseSpeechProvider {
     if (!Recognition) {
       this.shouldListen = false;
       this.hasError = true;
+      this.toast("Mic denied");
       this.fail(
         "Speech recognition is not supported in this browser. Try Chrome or Edge with microphone access enabled.",
       );
@@ -94,6 +100,9 @@ export class WebSpeechProvider extends BaseSpeechProvider {
 
       this.shouldListen = false;
       this.hasError = true;
+      if (event.error === "not-allowed" || event.error === "service-not-allowed") {
+        this.toast("Mic denied");
+      }
       this.fail(`Microphone error: ${event.error}. Check browser permissions and try Start again.`);
     };
 
@@ -114,6 +123,7 @@ export class WebSpeechProvider extends BaseSpeechProvider {
       return true;
     } catch {
       this.hasError = true;
+      this.toast("Mic denied");
       this.fail("Could not start microphone recognition. Check browser permissions and try again.");
       return false;
     }
@@ -170,6 +180,9 @@ export class DeepgramProvider extends BaseSpeechProvider {
     this.recorder = null;
     this.closedByUser = false;
     this.fallbackRequested = false;
+    this.retryCount = 0;
+    this.reconnectTimer = 0;
+    this.reconnecting = false;
   }
 
   async start() {
@@ -180,8 +193,16 @@ export class DeepgramProvider extends BaseSpeechProvider {
     try {
       this.closedByUser = false;
       this.fallbackRequested = false;
+      this.retryCount = 0;
       this.setStatus("paused", "Mic starting");
       this.stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+    } catch (error) {
+      this.toast("Mic denied");
+      this.stop();
+      return false;
+    }
+
+    try {
       await this.openSocket();
       this.startRecorder();
       this.setStatus("listening", "Deepgram listening");
@@ -213,7 +234,7 @@ export class DeepgramProvider extends BaseSpeechProvider {
         window.clearTimeout(failToOpen);
 
         if (opened) {
-          this.requestFallback();
+          this.scheduleReconnect();
           return;
         }
 
@@ -226,7 +247,7 @@ export class DeepgramProvider extends BaseSpeechProvider {
 
       socket.onclose = () => {
         if (opened && !this.closedByUser) {
-          this.requestFallback();
+          this.scheduleReconnect();
           return;
         }
 
@@ -236,6 +257,10 @@ export class DeepgramProvider extends BaseSpeechProvider {
   }
 
   startRecorder() {
+    if (this.recorder && this.recorder.state !== "inactive") {
+      return;
+    }
+
     const preferredTypes = ["audio/webm;codecs=opus", "audio/webm", "audio/ogg;codecs=opus"];
     const mimeType = preferredTypes.find((type) => MediaRecorder.isTypeSupported(type));
     this.recorder = new MediaRecorder(this.stream, mimeType ? { mimeType } : undefined);
@@ -283,8 +308,46 @@ export class DeepgramProvider extends BaseSpeechProvider {
     this.options.onFallback?.();
   }
 
+  scheduleReconnect() {
+    if (this.closedByUser || this.fallbackRequested || this.reconnecting) {
+      return;
+    }
+
+    this.retryCount += 1;
+
+    if (this.retryCount > 5) {
+      this.toast("STT disconnected");
+      this.requestFallback();
+      return;
+    }
+
+    const delay = Math.min(8000, 250 * 2 ** (this.retryCount - 1));
+    this.reconnecting = true;
+    this.setStatus("paused", `Deepgram reconnecting ${this.retryCount}/5`);
+    this.toast("Reconnecting STT");
+
+    window.clearTimeout(this.reconnectTimer);
+    this.reconnectTimer = window.setTimeout(async () => {
+      this.reconnecting = false;
+
+      if (this.closedByUser || this.fallbackRequested) {
+        return;
+      }
+
+      try {
+        await this.openSocket();
+        this.retryCount = 0;
+        this.startRecorder();
+        this.setStatus("listening", "Deepgram listening");
+      } catch {
+        this.scheduleReconnect();
+      }
+    }, delay);
+  }
+
   stop() {
     this.closedByUser = true;
+    window.clearTimeout(this.reconnectTimer);
 
     if (this.recorder && this.recorder.state !== "inactive") {
       this.recorder.stop();
@@ -341,6 +404,7 @@ class PreferredSpeechProvider extends BaseSpeechProvider {
     }
 
     this.unbindActiveProvider();
+    this.toast("STT disconnected");
     const webSpeechProvider = new WebSpeechProvider(this.options);
     this.bindActiveProvider(webSpeechProvider);
     webSpeechProvider.start();
