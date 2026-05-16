@@ -29,6 +29,7 @@ function getLastWords(text, count) {
   return text.trim().split(/\s+/).filter(Boolean).slice(-count);
 }
 
+// calculate edit distance between two word lists
 function levenshteinDistance(left, right) {
   const previous = Array.from({ length: right.length + 1 }, (_, index) => index);
   const current = Array(right.length + 1);
@@ -63,6 +64,7 @@ function similarityScore(left, right) {
   return 1 - levenshteinDistance(leftText, rightText) / longest;
 }
 
+// look for best match in a small window after the current cursor
 function findBestFuzzyMatch(spokenBuffer, scriptTokens, cursor) {
   if (!spokenBuffer.length) {
     return null;
@@ -91,6 +93,7 @@ function findBestFuzzyMatch(spokenBuffer, scriptTokens, cursor) {
   return bestMatch;
 }
 
+// split script into tokens and spaces while preserving original text
 function tokenizeScript(script) {
   const parts = script.match(/\s+|\S+/g) || [];
   let tokenIndex = 0;
@@ -182,6 +185,7 @@ function App() {
     setSpeechError("");
   }
 
+  // get element position and line index within the viewport
   function getPromptLineMetrics(index) {
     const prompt = promptRef.current;
     const tokenElement = tokenRefs.current[index];
@@ -203,6 +207,7 @@ function App() {
     };
   }
 
+  // align a specific token with the second line of the viewport
   function scrollTokenIntoReadingLine(index, { onlyIfTooLow = false } = {}) {
     const metrics = getPromptLineMetrics(index);
 
@@ -227,6 +232,7 @@ function App() {
     });
   }
 
+  // force scroll early if we are reaching the end of the current line
   function maybeSafetyScrollNearLineEnd(index, currentWpm) {
     const metrics = getPromptLineMetrics(index);
 
@@ -254,7 +260,8 @@ function App() {
     predictiveScrollTimerRef.current = 0;
   }
 
-  function updateSpeakingPace(index, timestamp) {
+  // calculate wpm by looking at time between word matches
+function updateSpeakingPace(index, timestamp) {
     const previous = matchPaceRef.current[matchPaceRef.current.length - 1];
 
     if (previous && timestamp - previous.timestamp > PAUSE_RESET_MS) {
@@ -353,7 +360,8 @@ function App() {
     return PRE_SCROLL_LEAD_MS;
   }
 
-  function schedulePredictiveScroll(matchedIndex, currentWpm, matchedAt) {
+  // predict when to scroll based on current pace
+function schedulePredictiveScroll(matchedIndex, currentWpm, matchedAt) {
     cancelPredictiveScroll();
 
     if (isPaused || isMobile || !currentWpm || matchedIndex + 1 >= scriptTokens.length) {
@@ -383,7 +391,8 @@ function App() {
     maybeSafetyScrollNearLineEnd(index, currentWpm);
   }
 
-  function handleInterimTranscript(transcript) {
+  // update UI cursor early using partial speech results
+function handleInterimTranscript(transcript) {
     const interimWords = transcript.trim().split(/\s+/).map(normalizeToken).filter(Boolean);
 
     if (!interimWords.length) {
@@ -407,7 +416,8 @@ function App() {
     moveVisualCursor(bestMatch.end, wpm || STARTUP_PREDICTIVE_WPM);
   }
 
-  function handleFinalWord(word) {
+  // process confirmed words and update scroll state
+function handleFinalWord(word) {
     cancelPredictiveScroll();
 
     const finalWord = normalizeToken(word);
@@ -439,7 +449,8 @@ function App() {
     schedulePredictiveScroll(bestMatch.end, activeWpm, matchedAt);
   }
 
-  async function startSpeechRecognition() {
+  // initialize speech provider and handle incoming words
+async function startSpeechRecognition() {
     const runId = (speechRunIdRef.current += 1);
 
     clearSpeechError();

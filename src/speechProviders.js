@@ -45,6 +45,7 @@ class BaseSpeechProvider {
   }
 }
 
+// use browser native speech recognition as a fallback
 export class WebSpeechProvider extends BaseSpeechProvider {
   recognition = null;
   restartTimer = 0;
@@ -171,6 +172,7 @@ export class WebSpeechProvider extends BaseSpeechProvider {
   }
 }
 
+// streaming audio to deepgram via websocket for high accuracy
 export class DeepgramProvider extends BaseSpeechProvider {
   constructor(options) {
     super(options);
@@ -256,6 +258,7 @@ export class DeepgramProvider extends BaseSpeechProvider {
     });
   }
 
+// capture raw microphone audio and pipe to websocket
   startRecorder() {
     if (this.recorder && this.recorder.state !== "inactive") {
       return;
@@ -308,6 +311,7 @@ export class DeepgramProvider extends BaseSpeechProvider {
     this.options.onFallback?.();
   }
 
+// retry connection with exponential backoff if socket drops
   scheduleReconnect() {
     if (this.closedByUser || this.fallbackRequested || this.reconnecting) {
       return;
@@ -369,6 +373,7 @@ export class DeepgramProvider extends BaseSpeechProvider {
   }
 }
 
+// try deepgram first then fall back to web speech if needed
 class PreferredSpeechProvider extends BaseSpeechProvider {
   activeProvider = null;
   unsubscribeActiveProvider = null;
