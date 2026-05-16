@@ -1,4 +1,5 @@
 import { Fragment, useEffect, useMemo, useRef, useState } from "react";
+import { createSpeechProvider } from "./speechProviders.js";
 
 const SPOKEN_BUFFER_SIZE = 8;
 const SEARCH_WINDOW_SIZE = 12;
@@ -11,10 +12,6 @@ function normalizeToken(token) {
 
 function getLastWords(text, count) {
   return text.trim().split(/\s+/).filter(Boolean).slice(-count);
-}
-
-function getFinalWords(transcript) {
-  return transcript.trim().split(/\s+/).map(normalizeToken).filter(Boolean);
 }
 
 function levenshteinDistance(left, right) {
@@ -123,10 +120,9 @@ function App() {
   const cursorRef = useRef(-1);
   const spokenBufferRef = useRef([]);
   const noMatchSinceRef = useRef(null);
-  const recognitionRef = useRef(null);
-  const restartTimerRef = useRef(0);
-  const shouldListenRef = useRef(false);
-  const hasSpeechErrorRef = useRef(false);
+  const providerRef = useRef(null);
+  const unsubscribeWordRef = useRef(null);
+  const speechRunIdRef = useRef(0);
 
   const promptParts = useMemo(() => tokenizeScript(script.trim()), [script]);
   const scriptTokens = useMemo(
@@ -141,13 +137,11 @@ function App() {
   }
 
   function showSpeechError(message) {
-    hasSpeechErrorRef.current = true;
     setSpeechError(message);
     setMicState("error", "Mic error");
   }
 
   function clearSpeechError() {
-    hasSpeechErrorRef.current = false;
     setSpeechError("");
   }
 
@@ -174,14 +168,14 @@ function App() {
     });
   }
 
-  function handleFinalTranscript(transcript) {
-    const finalWords = getFinalWords(transcript);
+  function handleFinalWord(word) {
+    const finalWord = normalizeToken(word);
 
-    if (!finalWords.length) {
+    if (!finalWord) {
       return;
     }
 
-    spokenBufferRef.current = [...spokenBufferRef.current, ...finalWords].slice(-SPOKEN_BUFFER_SIZE);
+    spokenBufferRef.current = [...spokenBufferRef.current, finalWord].slice(-SPOKEN_BUFFER_SIZE);
 
     const bestMatch = findBestFuzzyMatch(spokenBufferRef.current, scriptTokens, cursorRef.current);
 
@@ -197,131 +191,45 @@ function App() {
     scrollMatchedTokenIntoReadingLine(bestMatch.end);
   }
 
-  function scheduleRecognitionRestart() {
-    window.clearTimeout(restartTimerRef.current);
-
-    if (!shouldListenRef.current || !recognitionRef.current) {
-      return;
-    }
-
-    setMicState("paused", "Mic reconnecting");
-    restartTimerRef.current = window.setTimeout(() => {
-      if (!shouldListenRef.current || !recognitionRef.current) {
-        return;
-      }
-
-      try {
-        recognitionRef.current.start();
-      } catch {
-        scheduleRecognitionRestart();
-      }
-    }, 250);
-  }
-
-  function startSpeechRecognition() {
-    const Recognition = window.SpeechRecognition || window.webkitSpeechRecognition;
+  async function startSpeechRecognition() {
+    const runId = (speechRunIdRef.current += 1);
 
     clearSpeechError();
     setFinalTranscript("");
     setInterimTranscript("");
-    shouldListenRef.current = true;
 
-    if (!Recognition) {
-      shouldListenRef.current = false;
-      showSpeechError(
-        "Speech recognition is not supported in this browser. Try Chrome or Edge with microphone access enabled.",
-      );
-      return;
-    }
+    const provider = createSpeechProvider({
+      apiKey: import.meta.env.DEEPGRAM_API_KEY || "",
+      onStatus: setMicState,
+      onError: showSpeechError,
+    });
+    providerRef.current = provider;
 
-    const recognition = new Recognition();
-    recognitionRef.current = recognition;
-    recognition.continuous = true;
-    recognition.interimResults = true;
-    recognition.lang = navigator.language || "en-US";
-
-    recognition.onstart = () => {
-      if (!shouldListenRef.current) {
+    unsubscribeWordRef.current = provider.onWord((event) => {
+      if (event.isFinal) {
+        setFinalTranscript((current) => `${current} ${event.word}`.trim());
+        setInterimTranscript("");
+        handleFinalWord(event.word);
         return;
       }
 
-      clearSpeechError();
-      setMicState("listening", "Mic listening");
-    };
+      setInterimTranscript(event.transcript || event.word);
+    });
 
-    recognition.onresult = (event) => {
-      let nextInterim = "";
+    await provider.start();
 
-      for (let index = event.resultIndex; index < event.results.length; index += 1) {
-        const result = event.results[index];
-        const transcript = result[0].transcript;
-
-        if (result.isFinal) {
-          setFinalTranscript((current) => `${current} ${transcript}`.trim());
-          handleFinalTranscript(transcript);
-        } else {
-          nextInterim = `${nextInterim} ${transcript}`.trim();
-        }
-      }
-
-      setInterimTranscript(nextInterim);
-    };
-
-    recognition.onerror = (event) => {
-      if (!shouldListenRef.current) {
-        return;
-      }
-
-      const recoverableErrors = new Set(["aborted", "network", "no-speech"]);
-
-      if (recoverableErrors.has(event.error)) {
-        setMicState("paused", "Mic reconnecting");
-        return;
-      }
-
-      shouldListenRef.current = false;
-      showSpeechError(`Microphone error: ${event.error}. Check browser permissions and try Start again.`);
-    };
-
-    recognition.onend = () => {
-      if (shouldListenRef.current) {
-        scheduleRecognitionRestart();
-        return;
-      }
-
-      if (!hasSpeechErrorRef.current) {
-        setMicState("paused", "Mic paused");
-      }
-    };
-
-    try {
-      recognition.start();
-      setMicState("paused", "Mic starting");
-    } catch {
-      showSpeechError("Could not start microphone recognition. Check browser permissions and try again.");
+    if (speechRunIdRef.current !== runId || providerRef.current !== provider) {
+      provider.stop?.();
     }
   }
 
   function stopSpeechRecognition() {
-    shouldListenRef.current = false;
-    window.clearTimeout(restartTimerRef.current);
+    speechRunIdRef.current += 1;
+    unsubscribeWordRef.current?.();
+    unsubscribeWordRef.current = null;
+    providerRef.current?.stop?.();
+    providerRef.current = null;
     setMicState("paused", "Mic paused");
-
-    const recognition = recognitionRef.current;
-
-    if (!recognition) {
-      return;
-    }
-
-    recognition.onend = null;
-
-    try {
-      recognition.stop();
-    } catch {
-      recognition.abort();
-    }
-
-    recognitionRef.current = null;
   }
 
   function startReading() {
